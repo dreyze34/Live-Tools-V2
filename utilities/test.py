@@ -1,6 +1,7 @@
 import asyncio
-from perp_binance_interface import PerpBinance  # adapte ce nom au vrai fichier
+from binance_perp import PerpBinance  # adapte ce nom au vrai fichier
 import os
+import ccxt.async_support as ccxt  # 👈 version asynchrone !
 
 
 async def main():
@@ -29,6 +30,28 @@ async def main():
         print(order)
 
     await client.close()
+
+async def test():
+    public_key = os.getenv("BINANCE_API_KEY", "")
+    secret_key = os.getenv("BINANCE_SECRET_KEY", "")
+
+    client = ccxt.binance({
+        "apiKey": public_key,
+        "secret": secret_key,
+        "enableRateLimit": True,
+        "options": {
+            "defaultType": "spot",  # 👈 obligatoire si ta clé n’a pas les droits Futures
+        },
+    })
+
+    try:
+        await client.load_markets()
+        balance = await client.fetch_balance()
+        print("USDT:", balance['free']['USDT'])
+    except Exception as e:
+        print("Erreur:", e)
+    finally:
+        await client.close()
 
 if __name__ == "__main__":
     asyncio.run(main())

@@ -68,7 +68,7 @@ class PerpBinance:
             "enableRateLimit": True,
             "rateLimit": 100,
             "options": {
-                "defaultType": "future",
+                "defaultType": "spot",
             },
         }
         if not secret_api:
