@@ -7,7 +7,7 @@ import itertools
 from pydantic import BaseModel
 
 
-class UsdtBalance(BaseModel):
+class USDCBalance(BaseModel):
     total: float
     free: float
     used: float
@@ -68,7 +68,7 @@ class PerpBinance:
             "enableRateLimit": True,
             "rateLimit": 100,
             "options": {
-                "defaultType": "spot",
+                "defaultType": "margin",
             },
         }
         if not secret_api:
@@ -84,29 +84,22 @@ class PerpBinance:
     async def close(self):
         await self._session.close()
 
-    def ext_pair_to_pair(self, ext_pair) -> str:
-        return f"{ext_pair}/USDT"
-
     def pair_to_ext_pair(self, pair) -> str:
-        return pair.replace("/USDT", "")
+        return pair.replace("/USDC", "")
 
-    def get_pair_info(self, ext_pair) -> str:
-        pair = self.ext_pair_to_pair(ext_pair)
+    def get_pair_info(self, pair) -> str:
         return self.market.get(pair)
 
     def amount_to_precision(self, pair: str, amount: float) -> float:
-        pair = self.ext_pair_to_pair(pair)
         try:
             return float(self._session.amount_to_precision(pair, amount))
         except Exception:
             return 0
 
     def price_to_precision(self, pair: str, price: float) -> float:
-        pair = self.ext_pair_to_pair(pair)
         return float(self._session.price_to_precision(pair, price))
 
     async def get_last_ohlcv(self, pair, timeframe, limit=1000) -> pd.DataFrame:
-        pair = self.ext_pair_to_pair(pair)
         bitget_limit = 1500
         ts_dict = {
             "1m": 60 * 1000,
@@ -146,12 +139,63 @@ class PerpBinance:
         del df["date"]
         return df
 
-    async def get_balance(self) -> UsdtBalance:
-        resp = await self._session.fetch_balance()
-        return UsdtBalance(
-            total=resp["total"].get("USDT", 0),
-            free=resp["free"].get("USDT", 0),
-            used=resp["used"].get("USDT", 0),
+    async def get_balance(self) -> USDCBalance:
+        resp = await self._session.fetch_balance(params={"type": "margin"})
+        return USDCBalance(
+            total=resp["total"].get("USDC", 0),
+            free=resp["free"].get("USDC", 0),
+            used=resp["used"].get("USDC", 0),
+        )
+
+    async def set_margin_mode_and_leverage(self, pair, margin_mode, leverage):
+        if margin_mode not in ["crossed", "isolated"]:
+            raise Exception("Margin mode must be either 'crossed' or 'isolated'")
+        try:
+            await self._session.set_margin_mode(
+                margin_mode,
+                pair,
+                # params={"productType": "USDT-FUTURES", "marginCoin": "USDT"},
+            )
+        except Exception as e:
+            pass
+        try:
+            if margin_mode == "isolated":
+                tasks = []
+                tasks.append(
+                    self._session.set_leverage(
+                        leverage,
+                        pair,
+                        # params={
+                        #     "productType": "USDT-FUTURES",
+                        #     "marginCoin": "USDT",
+                        #     "holdSide": "long",
+                        # },
+                    )
+                )
+                # tasks.append(
+                #     self._session.set_leverage(
+                #         leverage,
+                #         pair,
+                #         # params={
+                #         #     "productType": "USDT-FUTURES",
+                #         #     "marginCoin": "USDT",
+                #         #     "holdSide": "short",
+                #         # },
+                #     )
+                # )
+                await asyncio.gather(*tasks)
+            else:
+                await self._session.set_leverage(
+                    leverage,
+                    pair,
+                    # params={"productType": "USDT-FUTURES", "marginCoin": "USDT"},
+                )
+        except Exception as e:
+            pass
+
+        return Info(
+            success=True,
+            message=f"Margin mode and leverage set to {margin_mode} and {leverage}x",
         )
 
     async def place_order(
@@ -167,7 +211,6 @@ class PerpBinance:
         error=False,
     ) -> Order:
         try:
-            pair = self.ext_pair_to_pair(pair)
             params = {"reduceOnly": reduce}
             resp = await self._session.create_order(
                 symbol=pair,
@@ -184,7 +227,7 @@ class PerpBinance:
                 side=resp["side"],
                 price=resp["price"],
                 size=resp["amount"],
-                reduce=resp.get("reduceOnly", reduce),
+                reduce=bool(resp.get("reduceOnly", reduce)),
                 filled=resp["filled"],
                 remaining=resp["remaining"],
                 timestamp=resp["timestamp"],
@@ -195,9 +238,8 @@ class PerpBinance:
                 raise e
             return None
 
-    async def get_open_orders(self, pair) -> List[Order]:
-        pair = self.ext_pair_to_pair(pair)
-        resp = await self._session.fetch_open_orders(pair)
+    async def get_open_orders(self, pair, params) -> List[Order]:
+        resp = await self._session.fetch_open_orders(pair, params=params)
         return [
             Order(
                 id=order["id"],
@@ -206,7 +248,7 @@ class PerpBinance:
                 side=order["side"],
                 price=order["price"],
                 size=order["amount"],
-                reduce=order.get("reduceOnly", False),
+                reduce=bool(order.get("reduceOnly", False)),
                 filled=order["filled"],
                 remaining=order["remaining"],
                 timestamp=order["timestamp"],
@@ -214,10 +256,42 @@ class PerpBinance:
             for order in resp
         ]
 
-    async def cancel_orders(self, pair, ids=[]):
+    async def get_all_open_orders(self, pairs, params) -> List[Order]:
+        all_orders = []
+        for pair in pairs:
+            orders = await self.get_open_orders(pair, params=params)
+            all_orders.extend(orders)
+        return all_orders
+
+
+    async def cancel_orders(self, pair, params={}) -> Info:
         try:
-            pair = self.ext_pair_to_pair(pair)
-            resp = await self._session.cancel_orders(ids, symbol=pair)
+            resp = await self._session.cancel_all_orders(symbol=pair, params=params)
             return Info(success=True, message=f"{len(resp)} orders cancelled")
         except Exception as e:
             return Info(success=False, message=f"Cancel failed: {e}")
+        
+    async def get_position(self, pair: str) -> Position:
+        """
+        Récupère les 'positions' en trading de marge (Cross margin) sur Binance.
+        Retourne une liste d’actifs avec un solde ou un emprunt non nul.
+        """
+        # Nécessite un sous-type de compte
+        margin_balance = await self._session.sapi_get_margin_account()
+
+        positions = []
+        for asset in margin_balance['userAssets']:
+            free = float(asset['free'])
+            borrowed = float(asset['borrowed'])
+            interest = float(asset['interest'])
+
+            if free != 0 or borrowed != 0 or interest != 0:
+                positions.append({
+                    'asset': asset['asset'],
+                    'free': free,
+                    'borrowed': borrowed,
+                    'interest': interest,
+                    'netAsset': float(asset['netAsset'])
+                })
+
+        return positions
