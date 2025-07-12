@@ -25,7 +25,6 @@ class Order(BaseModel):
     side: str
     price: float
     size: float
-    reduce: bool
     filled: float
     remaining: float
     timestamp: int
@@ -198,44 +197,53 @@ class PerpBinance:
             message=f"Margin mode and leverage set to {margin_mode} and {leverage}x",
         )
 
-    async def place_order(
-        self,
-        pair,
-        side,
-        price,
-        size,
-        type="limit",
-        reduce=False,
-        margin_mode="crossed",
-        hedge_mode=False,
-        error=False,
-    ) -> Order:
+    async def place_order(self, pair, side, size, type, price=None, margin_mode="crossed", params={}) -> Order:
+        params = {
+        'type': 'margin',
+        'marginMode': margin_mode,
+        }
         try:
-            params = {"reduceOnly": reduce}
-            resp = await self._session.create_order(
-                symbol=pair,
-                type=type,
-                side=side,
-                amount=size,
-                price=price if type == "limit" else None,
-                params=params,
-            )
-            return Order(
-                id=resp["id"],
-                pair=self.pair_to_ext_pair(resp["symbol"]),
-                type=resp["type"],
-                side=resp["side"],
-                price=resp["price"],
-                size=resp["amount"],
-                reduce=bool(resp.get("reduceOnly", reduce)),
-                filled=resp["filled"],
-                remaining=resp["remaining"],
-                timestamp=resp["timestamp"],
-            )
+            if type == "market":
+                resp = await self._session.create_order(
+                    symbol=pair,
+                    type=type,
+                    side=side,
+                    amount=size,
+                    params=params
+                )
+                return Order(
+                    id=resp["id"],
+                    pair=resp["symbol"],
+                    type=resp["type"],
+                    side=resp["side"],
+                    price=resp["price"],
+                    size=resp["amount"],
+                    filled=resp["filled"],
+                    remaining=resp["remaining"],
+                    timestamp=resp["timestamp"],
+                )
+            elif type == "limit":
+                resp = await self._session.create_order(
+                    symbol=pair,
+                    type=type,
+                    price=price,
+                    side=side,
+                    amount=size,
+                    params=params
+                )
+                return Order(
+                    id=resp["id"],
+                    pair=resp["symbol"],
+                    type=resp["type"],
+                    side=resp["side"],
+                    price=resp["price"],
+                    size=resp["amount"],
+                    filled=resp["filled"],
+                    remaining=resp["remaining"],
+                    timestamp=resp["timestamp"],
+                )
         except Exception as e:
             print(f"Error placing order: {e}")
-            if error:
-                raise e
             return None
 
     async def get_open_orders(self, pair, params) -> List[Order]:
